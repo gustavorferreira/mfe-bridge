@@ -7,36 +7,65 @@ import { EVENTS } from './events';
 export default function Page() {
   const [term, setTerm] = useState('');
 
-  const bridge = useMemo(() => createBridge({
-    role: 'child',
-    channel: 'mfe-v1',
-    allowedOrigins: ['http://localhost:3000'],
-    clientId: 'search',
-  }), []);
+  // cria bridge apenas uma vez
+  const bridge = useMemo(function () {
+    return createBridge({
+      role: 'child',
+      channel: 'mfe-v1',
+      allowedOrigins: ['http://localhost:3000'], // HOST
+      clientId: 'search',
 
-  useEffect(() => {
+      // ✅ recomendado
+      autoHello: true,
+      enableHeartbeat: true,
+      heartbeatIntervalMs: 2000,
+      debug: true,
+    });
+  }, []);
+
+  useEffect(function () {
     bridge.start();
-    return () => bridge.destroy();
+
+    return function () {
+      bridge.destroy();
+    };
   }, [bridge]);
 
+  function submit() {
+    bridge.emit(EVENTS.SEARCH_SUBMIT, { term: term });
+  }
+
   return (
-    <div style={{ padding: 16 }}>
+    <div style={{ padding: 16, fontFamily: 'sans-serif' }}>
       <h2>🔍 Pesquisa</h2>
+
       <input
         value={term}
-        onChange={(e) => setTerm(e.target.value)}
+        onChange={function (e) {
+          setTerm(e.target.value);
+        }}
         placeholder="Digite algo..."
-        style={{ padding: 8, width: '100%', boxSizing: 'border-box' }}
+        style={{
+          padding: 8,
+          width: '100%',
+          boxSizing: 'border-box',
+          marginBottom: 8,
+        }}
       />
+
       <button
-        onClick={() => bridge.emit(EVENTS.SEARCH_SUBMIT, { term })}
-        style={{ marginTop: 8, padding: 10 }}
+        onClick={submit}
+        style={{
+          padding: '10px 14px',
+          cursor: 'pointer',
+          fontWeight: 600,
+        }}
       >
         Pesquisar
       </button>
 
       <p style={{ marginTop: 12, fontSize: 12, opacity: 0.7 }}>
-        (Este MFE envia SEARCH_SUBMIT para o Host via @mfe/bridge)
+        (Este MFE envia <b>SEARCH_SUBMIT</b> para o Host via @mfe/bridge)
       </p>
     </div>
   );

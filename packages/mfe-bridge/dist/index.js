@@ -1,16 +1,13 @@
 /**
  * @mfe/bridge
  * Universal, SSR-safe, framework-agnostic message bridge (Host <-> Iframe MFEs)
- *
- * Design goals:
- * - No window access at import time (SSR-safe)
- * - Security-by-default: origin allowlist + channel + signed envelope
- * - Minimal API: start/destroy/on/off/emit/send/broadcast/request/handle
- * - Works with React/Next/Vite/Vanilla
+ * v2 – with iframe status + retry + heartbeat
  */
 
+/* ===================== helpers ===================== */
+
 function uid() {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
 }
 
 function isBrowser() {
@@ -21,251 +18,272 @@ function now() {
   return Date.now();
 }
 
-function makeEnvelope(channel, type, payload, extra = {}) {
-  return {
-    __mfe_bridge__: true,
-    v: 1,
-    channel,
-    type,
-    payload,
-    t: now(),
-    ...extra,
-  };
+function makeEnvelope(channel, type, payload, extra) {
+  return Object.assign(
+    {
+      __mfe_bridge__: true,
+      v: 1,
+      channel,
+      type,
+      payload,
+      t: now(),
+    },
+    extra || {}
+  );
 }
 
 function isEnvelope(data) {
   return !!data && typeof data === 'object' && data.__mfe_bridge__ === true && data.v === 1;
 }
 
-function hasOriginAllowlist(allowedOrigins) {
-  return Array.isArray(allowedOrigins) && allowedOrigins.length > 0;
-}
-
 function originAllowed(origin, allowedOrigins) {
-  if (!hasOriginAllowlist(allowedOrigins)) return false;
-  return allowedOrigins.includes(origin);
+  return Array.isArray(allowedOrigins) && allowedOrigins.includes(origin);
 }
 
-/**
- * @typedef {'host'|'child'} Role
- */
-
-/**
- * @typedef {Object} BridgeOptions
- * @property {Role} role
- * @property {string} channel
- * @property {string[]} allowedOrigins
- * @property {boolean=} debug
- * @property {string=} clientId           // used in child HELLO (optional)
- * @property {boolean=} autoHello         // default true (child sends HELLO on start)
- */
-
-/**
- * @typedef {Object} RegisterOptions
- * @property {string} origin  // expected origin for that iframe (recommended in prod)
- */
-
-/**
- * @typedef {Object} RpcRequestOptions
- * @property {number=} timeoutMs
- * @property {string=} targetOrigin
- */
+/* ===================== bridge ===================== */
 
 export function createBridge(options) {
-  const {
-    role,
-    channel,
-    allowedOrigins,
-    debug = false,
-    clientId,
-    autoHello = true,
-  } = options;
+  var role = options.role;
+  var channel = options.channel;
+  var allowedOrigins = options.allowedOrigins;
+  var debug = !!options.debug;
+
+  var clientId = options.clientId;
+  var autoHello = options.autoHello !== false;
+
+  var handshakeTimeoutMs = options.handshakeTimeoutMs || 4000;
+  var enableHeartbeat = !!options.enableHeartbeat;
+  var heartbeatIntervalMs = options.heartbeatIntervalMs || 2000;
+  var heartbeatTimeoutMs = options.heartbeatTimeoutMs || 7000;
 
   if (role !== 'host' && role !== 'child') {
-    throw new Error(`Invalid role: ${role}`);
+    throw new Error('Invalid role');
   }
-  if (!channel || typeof channel !== 'string') {
+  if (!channel) {
     throw new Error('channel is required');
   }
-  if (!hasOriginAllowlist(allowedOrigins)) {
-    throw new Error('allowedOrigins must be a non-empty array');
+  if (!Array.isArray(allowedOrigins) || allowedOrigins.length === 0) {
+    throw new Error('allowedOrigins must be non-empty');
   }
 
-  /** @type {Map<string, Set<Function>>} */
-  const eventHandlers = new Map();
+  var started = false;
 
-  /** @type {Map<string, Function>} */
-  const rpcHandlers = new Map();
+  /* ===================== internals ===================== */
 
-  /** @type {Map<string, {resolve: Function, reject: Function, timer: any}>} */
-  const pending = new Map();
+  var eventHandlers = new Map();
+  var rpcHandlers = new Map();
+  var pending = new Map();
 
-  // Host-only: clientId -> { win, origin }
-  /** @type {Map<string, {win: Window, origin: string}>} */
-  const clients = new Map();
+  // host only
+  var clients = new Map(); // clientId -> { win, origin, iframeEl, src, handshakeTimer }
+  var winToClient = new WeakMap();
 
-  // Host-only: sourceWindow -> clientId (filled by register or handshake)
-  /** @type {WeakMap<Window, string>} */
-  const winToClient = new WeakMap();
+  // status
+  var clientStatus = new Map(); // clientId -> { status, lastSeen, reason }
+  var statusHandlers = new Set();
 
-  let started = false;
+  var hostHeartbeatTimer = null;
+  var childHeartbeatTimer = null;
 
-  function log(...args) {
-    if (debug) console.log('[mfe-bridge]', ...args);
+  function log() {
+    if (debug) console.log('[mfe-bridge]', ...arguments);
+  }
+
+  function setStatus(id, status, reason) {
+    var obj = {
+      status: status,
+      lastSeen: now(),
+    };
+    if (reason) obj.reason = reason;
+
+    clientStatus.set(id, obj);
+
+    statusHandlers.forEach(function (h) {
+      try {
+        h(id, obj);
+      } catch (_) {}
+    });
+  }
+
+  /* ===================== public api ===================== */
+
+  function onStatus(handler) {
+    statusHandlers.add(handler);
+    return function () {
+      statusHandlers.delete(handler);
+    };
+  }
+
+  function getStatus(id) {
+    return clientStatus.get(id);
   }
 
   function on(type, handler) {
     if (!eventHandlers.has(type)) eventHandlers.set(type, new Set());
     eventHandlers.get(type).add(handler);
-    return () => off(type, handler);
+    return function () {
+      eventHandlers.get(type).delete(handler);
+    };
   }
 
   function off(type, handler) {
-    eventHandlers.get(type)?.delete(handler);
+    if (eventHandlers.has(type)) eventHandlers.get(type).delete(handler);
   }
 
   function emit(type, payload, targetOrigin) {
     if (!isBrowser()) return;
 
-    const envelope = makeEnvelope(channel, type, payload);
+    var envelope = makeEnvelope(channel, type, payload);
 
     if (role === 'child') {
-      const to = targetOrigin || allowedOrigins[0] || '*';
-      window.parent.postMessage(envelope, to);
+      window.parent.postMessage(envelope, targetOrigin || allowedOrigins[0] || '*');
       return;
     }
 
-    // host emit() behaves like broadcast() for convenience
     broadcast(type, payload, targetOrigin);
   }
 
-  function register(clientId, iframeEl, opts) {
-    if (role !== 'host') {
-      throw new Error('register() is host-only');
-    }
-    const w = iframeEl?.contentWindow;
-    if (!w) throw new Error(`iframe ${clientId} without contentWindow`);
-    const origin = opts?.origin || allowedOrigins[0];
-    clients.set(clientId, { win: w, origin });
-    winToClient.set(w, clientId);
+  function register(id, iframeEl, opts) {
+    if (role !== 'host') throw new Error('register is host-only');
+
+    var w = iframeEl && iframeEl.contentWindow;
+    if (!w) throw new Error('iframe without contentWindow');
+
+    var origin = (opts && opts.origin) || allowedOrigins[0];
+
+    clients.set(id, {
+      win: w,
+      origin: origin,
+      iframeEl: iframeEl,
+      src: iframeEl.src,
+      handshakeTimer: null,
+    });
+
+    winToClient.set(w, id);
+    setStatus(id, 'loading');
+
+    var timeout = (opts && opts.handshakeTimeoutMs) || handshakeTimeoutMs;
+    var c = clients.get(id);
+
+    if (c.handshakeTimer) clearTimeout(c.handshakeTimer);
+
+    c.handshakeTimer = setTimeout(function () {
+      var s = clientStatus.get(id);
+      if (s && s.status === 'loading') {
+        setStatus(id, 'offline', 'handshake_timeout');
+      }
+    }, timeout);
   }
 
-  function unregister(clientId) {
-    if (role !== 'host') return;
-    clients.delete(clientId);
+  function unregister(id) {
+    var c = clients.get(id);
+    if (c && c.handshakeTimer) clearTimeout(c.handshakeTimer);
+    clients.delete(id);
+    clientStatus.delete(id);
   }
 
-  function send(clientId, type, payload, targetOrigin) {
-    if (!isBrowser()) return;
-    if (role !== 'host') throw new Error('send() is host-only');
+  function send(id, type, payload, targetOrigin) {
+    if (role !== 'host') throw new Error('send is host-only');
+    var c = clients.get(id);
+    if (!c) throw new Error('client not registered');
 
-    const c = clients.get(clientId);
-    if (!c) throw new Error(`client not registered: ${clientId}`);
-
-    const envelope = makeEnvelope(channel, type, payload);
-
-    // In prod: prefer explicit per-iframe origin (register options)
-    const to = targetOrigin || c.origin || allowedOrigins[0];
-    c.win.postMessage(envelope, to);
+    c.win.postMessage(makeEnvelope(channel, type, payload), targetOrigin || c.origin);
   }
 
   function broadcast(type, payload, targetOrigin) {
-    if (!isBrowser()) return;
-    if (role !== 'host') throw new Error('broadcast() is host-only');
+    if (role !== 'host') throw new Error('broadcast is host-only');
 
-    const envelope = makeEnvelope(channel, type, payload);
-
-    for (const [, c] of clients) {
-      const to = targetOrigin || c.origin || allowedOrigins[0];
-      c.win.postMessage(envelope, to);
-    }
+    clients.forEach(function (c) {
+      c.win.postMessage(makeEnvelope(channel, type, payload), targetOrigin || c.origin);
+    });
   }
 
   function handle(type, fn) {
     rpcHandlers.set(type, fn);
-    return () => rpcHandlers.delete(type);
+    return function () {
+      rpcHandlers.delete(type);
+    };
   }
 
-  function request(type, payload, reqOpts = {}) {
-    const { timeoutMs = 6000, targetOrigin } = reqOpts;
-
-    if (!isBrowser()) {
-      return Promise.reject(new Error('request() called outside browser runtime'));
-    }
-
-    // For host: require a "to" clientId in payload wrapper.
-    // Safer API: hostRequest(clientId, type, payload)
+  function request(type, payload, opts) {
     if (role === 'host') {
-      return Promise.reject(new Error('Use hostRequest(clientId, type, payload, options) on host'));
+      return Promise.reject(new Error('use hostRequest on host'));
     }
 
-    const id = uid();
-    const envelope = makeEnvelope(channel, type, payload, { id });
+    opts = opts || {};
+    var id = uid();
+    var to = opts.targetOrigin || allowedOrigins[0];
 
-    const to = targetOrigin || allowedOrigins[0] || '*';
-    window.parent.postMessage(envelope, to);
+    window.parent.postMessage(makeEnvelope(channel, type, payload, { id: id }), to);
 
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () {
         pending.delete(id);
-        reject(new Error(`RPC timeout: ${type}`));
-      }, timeoutMs);
-      pending.set(id, { resolve, reject, timer });
+        reject(new Error('RPC timeout'));
+      }, opts.timeoutMs || 6000);
+
+      pending.set(id, { resolve: resolve, reject: reject, timer: timer });
     });
   }
 
-  function hostRequest(clientId, type, payload, reqOpts = {}) {
-    const { timeoutMs = 6000, targetOrigin } = reqOpts;
-
-    if (!isBrowser()) {
-      return Promise.reject(new Error('hostRequest() called outside browser runtime'));
-    }
+  function hostRequest(id, type, payload, opts) {
     if (role !== 'host') {
-      return Promise.reject(new Error('hostRequest() is host-only'));
+      return Promise.reject(new Error('hostRequest is host-only'));
     }
 
-    const c = clients.get(clientId);
-    if (!c) return Promise.reject(new Error(`client not registered: ${clientId}`));
+    opts = opts || {};
+    var c = clients.get(id);
+    if (!c) return Promise.reject(new Error('client not registered'));
 
-    const id = uid();
-    const envelope = makeEnvelope(channel, type, payload, { id });
+    var reqId = uid();
+    var to = opts.targetOrigin || c.origin;
 
-    const to = targetOrigin || c.origin || allowedOrigins[0];
-    c.win.postMessage(envelope, to);
+    c.win.postMessage(makeEnvelope(channel, type, payload, { id: reqId }), to);
 
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(new Error(`RPC timeout: ${type} -> ${clientId}`));
-      }, timeoutMs);
-      pending.set(id, { resolve, reject, timer });
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () {
+        pending.delete(reqId);
+        reject(new Error('RPC timeout'));
+      }, opts.timeoutMs || 6000);
+
+      pending.set(reqId, { resolve: resolve, reject: reject, timer: timer });
     });
   }
+
+  function retry(id, opts) {
+    if (role !== 'host') throw new Error('retry is host-only');
+    var c = clients.get(id);
+    if (!c || !c.iframeEl) throw new Error('client not registered');
+
+    opts = opts || {};
+    setStatus(id, 'loading', 'retry');
+
+    var src = c.src;
+    if (opts.bustCache !== false) {
+      src += (src.indexOf('?') >= 0 ? '&' : '?') + '__retry__=' + Date.now();
+    }
+
+    c.iframeEl.src = src;
+
+    if (c.handshakeTimer) clearTimeout(c.handshakeTimer);
+    c.handshakeTimer = setTimeout(function () {
+      var s = clientStatus.get(id);
+      if (s && s.status === 'loading') {
+        setStatus(id, 'offline', 'handshake_timeout');
+      }
+    }, handshakeTimeoutMs);
+  }
+
+  /* ===================== message handler ===================== */
 
   async function onMessage(ev) {
-    // origin allowlist
     if (!originAllowed(ev.origin, allowedOrigins)) return;
 
-    const data = ev.data;
-    if (!isEnvelope(data)) return;
-    if (data.channel !== channel) return;
+    var data = ev.data;
+    if (!isEnvelope(data) || data.channel !== channel) return;
 
-    // Optional: host can bind events to a known clientId
-    const sourceWin = ev.source;
-    if (role === 'host' && sourceWin && typeof sourceWin === 'object') {
-      // If host used register(), we have mapping. If not, handshake may create it.
-      const knownClientId = winToClient.get(sourceWin);
-      if (knownClientId) {
-        log('from client', knownClientId, 'type', data.type);
-      } else {
-        // Still allow if origin is allowlisted (useful for early HELLO)
-        log('from unknown window', 'type', data.type);
-      }
-    }
-
-    // RPC reply
     if (data.replyTo) {
-      const p = pending.get(data.replyTo);
+      var p = pending.get(data.replyTo);
       if (!p) return;
       clearTimeout(p.timer);
       pending.delete(data.replyTo);
@@ -273,97 +291,144 @@ export function createBridge(options) {
       return;
     }
 
-    // Handshake: child says HELLO; host responds READY
     if (role === 'host' && data.type === 'MFE_HELLO') {
-      const incomingId = data.payload?.clientId;
-      if (incomingId && ev.source) {
-        // bind source window to clientId (even if not registered by iframe ref)
-        winToClient.set(ev.source, incomingId);
+      var id = data.payload && data.payload.clientId;
+      if (id && ev.source) {
+        winToClient.set(ev.source, id);
+
+        var c = clients.get(id);
+        if (c && c.handshakeTimer) {
+          clearTimeout(c.handshakeTimer);
+          c.handshakeTimer = null;
+        }
+
+        setStatus(id, 'ready');
       }
 
-      // reply READY
-      try {
-        ev.source?.postMessage(
-          makeEnvelope(channel, 'MFE_READY', { ok: true, channel }),
-          ev.origin
-        );
-      } catch {}
+      ev.source.postMessage(makeEnvelope(channel, 'MFE_READY', { ok: true }), ev.origin);
       return;
     }
 
-    // RPC request handling
+    if (role === 'host' && data.type === 'MFE_PING') {
+      var pid = data.payload && data.payload.clientId;
+      if (pid && clientStatus.has(pid)) {
+        var s = clientStatus.get(pid);
+        clientStatus.set(pid, Object.assign({}, s, { lastSeen: now() }));
+      }
+      return;
+    }
+
     if (data.id && rpcHandlers.has(data.type)) {
-      const fn = rpcHandlers.get(data.type);
       try {
-        const result = await fn(data.payload, { origin: ev.origin });
-        ev.source?.postMessage(
-          makeEnvelope(channel, `${data.type}:reply`, result, { replyTo: data.id }),
+        var res = await rpcHandlers.get(data.type)(data.payload);
+        ev.source.postMessage(
+          makeEnvelope(channel, data.type + ':reply', res, { replyTo: data.id }),
           ev.origin
         );
-      } catch (err) {
-        ev.source?.postMessage(
-          makeEnvelope(channel, `${data.type}:reply`, { error: true, message: err?.message || 'RPC error' }, { replyTo: data.id }),
+      } catch (e) {
+        ev.source.postMessage(
+          makeEnvelope(
+            channel,
+            data.type + ':reply',
+            { error: true, message: e.message },
+            { replyTo: data.id }
+          ),
           ev.origin
         );
       }
       return;
     }
 
-    // Normal event
-    const handlers = eventHandlers.get(data.type);
-    if (!handlers || handlers.size === 0) return;
-    for (const h of handlers) {
-      try {
-        await h(data.payload, { origin: ev.origin });
-      } catch (e) {
-        log('handler error', e);
-      }
+    var handlers = eventHandlers.get(data.type);
+    if (handlers) {
+      handlers.forEach(function (h) {
+        try {
+          h(data.payload);
+        } catch (_) {}
+      });
     }
   }
+
+  /* ===================== lifecycle ===================== */
 
   function start() {
     if (!isBrowser() || started) return;
     window.addEventListener('message', onMessage);
     started = true;
-    log('started', { role, channel });
+    log('started', role);
 
-    if (role === 'child' && autoHello) {
-      // announce to host (optional)
-      const hello = makeEnvelope(channel, 'MFE_HELLO', { clientId: clientId || uid() });
-      window.parent.postMessage(hello, allowedOrigins[0] || '*');
+    if (role === 'host' && enableHeartbeat) {
+      hostHeartbeatTimer = setInterval(function () {
+        var t = now();
+        clientStatus.forEach(function (s, id) {
+          if (s.status === 'ready' && t - s.lastSeen > heartbeatTimeoutMs) {
+            setStatus(id, 'offline', 'heartbeat_timeout');
+          }
+        });
+      }, Math.max(500, heartbeatTimeoutMs / 2));
+    }
+
+    if (role === 'child') {
+      var myId = clientId || uid();
+
+      if (autoHello) {
+        window.parent.postMessage(
+          makeEnvelope(channel, 'MFE_HELLO', { clientId: myId }),
+          allowedOrigins[0]
+        );
+      }
+
+      if (enableHeartbeat) {
+        childHeartbeatTimer = setInterval(function () {
+          window.parent.postMessage(
+            makeEnvelope(channel, 'MFE_PING', { clientId: myId }),
+            allowedOrigins[0]
+          );
+        }, heartbeatIntervalMs);
+      }
     }
   }
 
   function destroy() {
     if (!isBrowser() || !started) return;
     window.removeEventListener('message', onMessage);
-    for (const [, p] of pending) clearTimeout(p.timer);
-    pending.clear();
+
+    pending.forEach(function (p) {
+      clearTimeout(p.timer);
+    });
+
+    if (hostHeartbeatTimer) clearInterval(hostHeartbeatTimer);
+    if (childHeartbeatTimer) clearInterval(childHeartbeatTimer);
+
     eventHandlers.clear();
     rpcHandlers.clear();
+    pending.clear();
     clients.clear();
+    clientStatus.clear();
+    statusHandlers.clear();
+
     started = false;
   }
 
   return {
-    // lifecycle
     start,
     destroy,
 
-    // events
     on,
     off,
     emit,
 
-    // host-only routing
     register,
     unregister,
     send,
     broadcast,
 
-    // RPC
-    request,     // child-only
-    hostRequest, // host-only
+    request,
+    hostRequest,
     handle,
+
+    onStatus,
+    getStatus,
+    retry,
   };
 }
