@@ -1,0 +1,24 @@
+{
+  "name": "@mfe/bridge-react",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "dependencies": {
+    "@mfe/bridge": "0.1.0"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "scripts": {
+    "build": "node ./build.mjs",
+    "prepublishOnly": "npm run build"
+  }
+}

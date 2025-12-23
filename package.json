@@ -1,0 +1,17 @@
+{
+  "name": "mfe-bridge-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n HOST,SEARCH,RESULTS -c auto \"npm run dev -w examples/next-host\" \"npm run dev -w examples/next-search\" \"npm run dev -w examples/next-results\"",
+    "build": "npm run build -w packages/mfe-bridge && npm run build -w packages/mfe-bridge-react",
+    "lint": "echo \"(optional) add eslint\"",
+    "clean": "node ./scripts/clean.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}
