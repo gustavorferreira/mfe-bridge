@@ -54,4 +54,4 @@ Veja `docs/ROADMAP.md`.
 
 ## Example
 
-![Exemplo do MFE Bridge](docs/Example.png)
+![Exemplo do MFE Bridge](docs/Example.gif)
