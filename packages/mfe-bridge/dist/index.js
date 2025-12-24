@@ -6,45 +6,72 @@
 
 /* ===================== helpers ===================== */
 
+/**
+ * Gera um identificador único.
+ * Usado para correlacionar requisições RPC e respostas.
+ */
 function uid() {
   return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
 }
 
+/**
+ * Verifica se o código está rodando no browser.
+ * Evita erros em SSR (Next.js, Node.js).
+ */
 function isBrowser() {
   return typeof window !== 'undefined' && typeof window.addEventListener === 'function';
 }
 
+/**
+ * Retorna o timestamp atual em milissegundos.
+ * Centraliza chamadas de Date.now().
+ */
 function now() {
   return Date.now();
 }
 
+/**
+ * Cria o envelope padrão de mensagens do bridge.
+ * Todas as mensagens trafegam nesse formato.
+ */
 function makeEnvelope(channel, type, payload, extra) {
   return Object.assign(
     {
-      __mfe_bridge__: true,
-      v: 1,
-      channel,
-      type,
-      payload,
-      t: now(),
+      __mfe_bridge__: true, // marca interna do bridge
+      v: 1,                 // versão do protocolo
+      channel,              // canal lógico
+      type,                 // tipo do evento/mensagem
+      payload,              // dados da mensagem
+      t: now(),             // timestamp
     },
     extra || {}
   );
 }
 
+/**
+ * Verifica se o objeto recebido é um envelope válido do bridge.
+ */
 function isEnvelope(data) {
   return !!data && typeof data === 'object' && data.__mfe_bridge__ === true && data.v === 1;
 }
 
+/**
+ * Verifica se a origin da mensagem é permitida.
+ * Camada básica de segurança contra postMessage externo.
+ */
 function originAllowed(origin, allowedOrigins) {
   return Array.isArray(allowedOrigins) && allowedOrigins.includes(origin);
 }
 
 /* ===================== bridge ===================== */
 
+/**
+ * Cria uma instância do bridge de comunicação.
+ * Pode atuar como host (container) ou child (iframe).
+ */
 export function createBridge(options) {
-  var role = options.role;
-  var channel = options.channel;
+  var role = options.role;                 // 'host' ou 'child'
+  var channel = options.channel;           // canal lógico
   var allowedOrigins = options.allowedOrigins;
   var debug = !!options.debug;
 
@@ -56,6 +83,7 @@ export function createBridge(options) {
   var heartbeatIntervalMs = options.heartbeatIntervalMs || 2000;
   var heartbeatTimeoutMs = options.heartbeatTimeoutMs || 7000;
 
+  // Validações iniciais
   if (role !== 'host' && role !== 'child') {
     throw new Error('Invalid role');
   }
@@ -70,25 +98,41 @@ export function createBridge(options) {
 
   /* ===================== internals ===================== */
 
+  /** Handlers de eventos simples (pub/sub) */
   var eventHandlers = new Map();
+
+  /** Handlers de RPC (request/response) */
   var rpcHandlers = new Map();
+
+  /** Requisições RPC pendentes aguardando resposta */
   var pending = new Map();
 
-  // host only
+  /** (host) clientes registrados */
   var clients = new Map(); // clientId -> { win, origin, iframeEl, src, handshakeTimer }
+
+  /** Mapeia window -> clientId */
   var winToClient = new WeakMap();
 
-  // status
+  /** Status de cada cliente */
   var clientStatus = new Map(); // clientId -> { status, lastSeen, reason }
+
+  /** Observadores de mudança de status */
   var statusHandlers = new Set();
 
+  /** Timers de heartbeat */
   var hostHeartbeatTimer = null;
   var childHeartbeatTimer = null;
 
+  /**
+   * Log interno condicionado ao modo debug.
+   */
   function log() {
     if (debug) console.log('[mfe-bridge]', ...arguments);
   }
 
+  /**
+   * Atualiza o status de um cliente e notifica observadores.
+   */
   function setStatus(id, status, reason) {
     var obj = {
       status: status,
@@ -107,6 +151,9 @@ export function createBridge(options) {
 
   /* ===================== public api ===================== */
 
+  /**
+   * Registra um listener para mudanças de status dos MFEs.
+   */
   function onStatus(handler) {
     statusHandlers.add(handler);
     return function () {
@@ -114,10 +161,16 @@ export function createBridge(options) {
     };
   }
 
+  /**
+   * Retorna o status atual de um cliente.
+   */
   function getStatus(id) {
     return clientStatus.get(id);
   }
 
+  /**
+   * Registra um listener para um tipo de evento.
+   */
   function on(type, handler) {
     if (!eventHandlers.has(type)) eventHandlers.set(type, new Set());
     eventHandlers.get(type).add(handler);
@@ -126,10 +179,18 @@ export function createBridge(options) {
     };
   }
 
+  /**
+   * Remove um listener de evento.
+   */
   function off(type, handler) {
     if (eventHandlers.has(type)) eventHandlers.get(type).delete(handler);
   }
 
+  /**
+   * Emite um evento.
+   * - Child → parent
+   * - Host → broadcast
+   */
   function emit(type, payload, targetOrigin) {
     if (!isBrowser()) return;
 
@@ -143,6 +204,10 @@ export function createBridge(options) {
     broadcast(type, payload, targetOrigin);
   }
 
+  /**
+   * (host) Registra um iframe como cliente.
+   * Inicia handshake e controle de status.
+   */
   function register(id, iframeEl, opts) {
     if (role !== 'host') throw new Error('register is host-only');
 
@@ -175,6 +240,9 @@ export function createBridge(options) {
     }, timeout);
   }
 
+  /**
+   * (host) Remove um cliente registrado.
+   */
   function unregister(id) {
     var c = clients.get(id);
     if (c && c.handshakeTimer) clearTimeout(c.handshakeTimer);
@@ -182,6 +250,9 @@ export function createBridge(options) {
     clientStatus.delete(id);
   }
 
+  /**
+   * (host) Envia mensagem para um cliente específico.
+   */
   function send(id, type, payload, targetOrigin) {
     if (role !== 'host') throw new Error('send is host-only');
     var c = clients.get(id);
@@ -190,6 +261,9 @@ export function createBridge(options) {
     c.win.postMessage(makeEnvelope(channel, type, payload), targetOrigin || c.origin);
   }
 
+  /**
+   * (host) Envia mensagem para todos os clientes registrados.
+   */
   function broadcast(type, payload, targetOrigin) {
     if (role !== 'host') throw new Error('broadcast is host-only');
 
@@ -198,6 +272,9 @@ export function createBridge(options) {
     });
   }
 
+  /**
+   * Registra um handler RPC (request/response).
+   */
   function handle(type, fn) {
     rpcHandlers.set(type, fn);
     return function () {
@@ -205,6 +282,9 @@ export function createBridge(options) {
     };
   }
 
+  /**
+   * (child) Envia uma requisição RPC ao host.
+   */
   function request(type, payload, opts) {
     if (role === 'host') {
       return Promise.reject(new Error('use hostRequest on host'));
@@ -226,6 +306,9 @@ export function createBridge(options) {
     });
   }
 
+  /**
+   * (host) Envia uma requisição RPC a um cliente específico.
+   */
   function hostRequest(id, type, payload, opts) {
     if (role !== 'host') {
       return Promise.reject(new Error('hostRequest is host-only'));
@@ -250,6 +333,9 @@ export function createBridge(options) {
     });
   }
 
+  /**
+   * (host) Recarrega o iframe e reinicia o handshake.
+   */
   function retry(id, opts) {
     if (role !== 'host') throw new Error('retry is host-only');
     var c = clients.get(id);
@@ -276,12 +362,17 @@ export function createBridge(options) {
 
   /* ===================== message handler ===================== */
 
+  /**
+   * Handler global de mensagens postMessage.
+   * Responsável por eventos, RPC, handshake e heartbeat.
+   */
   async function onMessage(ev) {
     if (!originAllowed(ev.origin, allowedOrigins)) return;
 
     var data = ev.data;
     if (!isEnvelope(data) || data.channel !== channel) return;
 
+    // Resposta RPC
     if (data.replyTo) {
       var p = pending.get(data.replyTo);
       if (!p) return;
@@ -291,6 +382,7 @@ export function createBridge(options) {
       return;
     }
 
+    // Handshake inicial
     if (role === 'host' && data.type === 'MFE_HELLO') {
       var id = data.payload && data.payload.clientId;
       if (id && ev.source) {
@@ -309,6 +401,7 @@ export function createBridge(options) {
       return;
     }
 
+    // Heartbeat
     if (role === 'host' && data.type === 'MFE_PING') {
       var pid = data.payload && data.payload.clientId;
       if (pid && clientStatus.has(pid)) {
@@ -318,6 +411,7 @@ export function createBridge(options) {
       return;
     }
 
+    // Execução de RPC
     if (data.id && rpcHandlers.has(data.type)) {
       try {
         var res = await rpcHandlers.get(data.type)(data.payload);
@@ -339,6 +433,7 @@ export function createBridge(options) {
       return;
     }
 
+    // Eventos simples
     var handlers = eventHandlers.get(data.type);
     if (handlers) {
       handlers.forEach(function (h) {
@@ -351,6 +446,9 @@ export function createBridge(options) {
 
   /* ===================== lifecycle ===================== */
 
+  /**
+   * Inicia o bridge (ativa listeners, handshake e heartbeat).
+   */
   function start() {
     if (!isBrowser() || started) return;
     window.addEventListener('message', onMessage);
@@ -389,6 +487,9 @@ export function createBridge(options) {
     }
   }
 
+  /**
+   * Encerra o bridge, removendo listeners e timers.
+   */
   function destroy() {
     if (!isBrowser() || !started) return;
     window.removeEventListener('message', onMessage);
