@@ -9,10 +9,12 @@ Este repositório ZIP contém:
 - **examples/next-results**: MFE de resultados em Next.js (JS)
 
 ## Requisitos
+
 - Node 18+
 - npm 9+ (ou pnpm/yarn)
 
 ## Rodar o exemplo (3 apps)
+
 Na raiz:
 
 ```bash
@@ -26,22 +28,30 @@ npm run dev
 ```
 
 Portas padrão:
+
 - Host: http://localhost:3000
 - Search: http://localhost:3001
 - Results: http://localhost:3002
 
 ## Ideia
+
 - **Host** define layout e iframe slots
 - **MFEs** são independentes e se comunicam com o host via **@mfe/bridge**
 
 ## Segurança (por padrão)
+
 - allowlist de origins
 - channel para isolar apps
-- envelope assinado (__mfe_bridge__)
+- envelope assinado (**mfe_bridge**)
 - listener só roda após `start()` (SSR-safe)
 - host pode “bindar” clientId ao window do iframe (opcional)
 - handshake "HELLO/READY" (opcional)
 - RPC request/response com timeout (opcional)
 
 ## Roadmap (já incluído e extensível)
+
 Veja `docs/ROADMAP.md`.
+
+## Example
+
+![Exemplo do MFE Bridge](docs/Example.png)
