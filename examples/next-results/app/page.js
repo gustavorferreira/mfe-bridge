@@ -62,10 +62,6 @@ export default function Page() {
           </tbody>
         </table>
       )}
-
-      <p style={{ marginTop: 12, fontSize: 12, opacity: 0.7 }}>
-        (Lista filtrada pelo Search via Host)
-      </p>
     </div>
   );
 }

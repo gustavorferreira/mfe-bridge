@@ -134,7 +134,13 @@ export default function Page() {
       var term = payload && payload.term ? payload.term.toLowerCase() : '';
 
       var filtered = CITIES.filter(function (c) {
-        return c.name.toLowerCase().includes(term);
+        if (!term) return true;
+
+        var idMatch = String(c.id).includes(term);
+        var nameMatch = c.name.toLowerCase().includes(term);
+        var ufMatch = c.uf.toLowerCase().includes(term);
+
+        return idMatch || nameMatch || ufMatch;
       });
 
       host.send('results', EVENTS.SEARCH_RESULT, filtered);
@@ -149,28 +155,33 @@ export default function Page() {
   }, [host, CITIES]);
 
   return (
-    <main style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 16, height: '100vh', padding: 16 }}>
-      <MfePanel
-        id="search"
-        src="http://localhost:3001"
-        iframeRef={searchRef}
-        status={status.search.status}
-        reason={status.search.reason}
-        onRetry={function () {
-          host.retry('search');
-        }}
-      />
+    <div>
+      <div style={{ padding: 16 }}>
+        <b>1. host</b>
+      </div>
+      <main style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 16, height: '100vh', paddingLeft: 16 }}>
+        <MfePanel
+          id="2. search"
+          src="http://localhost:3001"
+          iframeRef={searchRef}
+          status={status.search.status}
+          reason={status.search.reason}
+          onRetry={function () {
+            host.retry('search');
+          }}
+        />
 
-      <MfePanel
-        id="results"
-        src="http://localhost:3002"
-        iframeRef={resultsRef}
-        status={status.results.status}
-        reason={status.results.reason}
-        onRetry={function () {
-          host.retry('results');
-        }}
-      />
-    </main>
+        <MfePanel
+          id="3. results"
+          src="http://localhost:3002"
+          iframeRef={resultsRef}
+          status={status.results.status}
+          reason={status.results.reason}
+          onRetry={function () {
+            host.retry('results');
+          }}
+        />
+      </main>
+    </div>
   );
 }
