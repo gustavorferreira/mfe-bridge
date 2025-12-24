@@ -29,7 +29,7 @@ function OfflineCard(props) {
 }
 
 function MfePanel(props) {
-  var showIframe = props.status === 'ready';
+  const showIframe = props.status === 'ready';
 
   return (
     <div style={{ border: '1px solid #ddd', borderRadius: 8, overflow: 'hidden' }}>
@@ -41,7 +41,7 @@ function MfePanel(props) {
         {props.status === 'loading' && <Skeleton />}
         {props.status === 'offline' && (
           <OfflineCard
-            title={'Módulo "' + props.id + '" indisponível'}
+            title={`Módulo "${props.id}" indisponível`}
             subtitle={props.reason || 'Falha ao carregar'}
             onRetry={props.onRetry}
           />
@@ -65,31 +65,15 @@ function MfePanel(props) {
 /* ===================== PAGE ===================== */
 
 export default function Page() {
-  var searchRef = useRef(null);
-  var resultsRef = useRef(null);
+  const searchRef = useRef(null);
+  const resultsRef = useRef(null);
 
-  var [status, setStatus] = useState({
+  const [status, setStatus] = useState({
     search: { status: 'loading' },
     results: { status: 'loading' },
   });
 
-  // 🔹 MOCK CENTRAL (fonte da verdade)
-  var CITIES = useMemo(function () {
-    return [
-      { id: 1, name: 'São Paulo', uf: 'SP' },
-      { id: 2, name: 'Rio de Janeiro', uf: 'RJ' },
-      { id: 3, name: 'Belo Horizonte', uf: 'MG' },
-      { id: 4, name: 'Curitiba', uf: 'PR' },
-      { id: 5, name: 'Florianópolis', uf: 'SC' },
-      { id: 6, name: 'Porto Alegre', uf: 'RS' },
-      { id: 7, name: 'Salvador', uf: 'BA' },
-      { id: 8, name: 'Recife', uf: 'PE' },
-      { id: 9, name: 'Fortaleza', uf: 'CE' },
-      { id: 10, name: 'Manaus', uf: 'AM' },
-    ];
-  }, []);
-
-  var host = useMemo(function () {
+  const host = useMemo(() => {
     return createBridge({
       role: 'host',
       channel: 'mfe-v1',
@@ -99,66 +83,42 @@ export default function Page() {
     });
   }, []);
 
-  useEffect(function () {
+  useEffect(() => {
     host.start();
 
-    var offStatus = host.onStatus(function (id, s) {
-      setStatus(function (prev) {
-        return Object.assign({}, prev, { [id]: s });
-      });
+    const offStatus = host.onStatus((id, s) => {
+      setStatus(prev => ({ ...prev, [id]: s }));
     });
 
-    var t = setInterval(function () {
-      if (searchRef.current && searchRef.current.contentWindow) {
-        try {
-          host.register('search', searchRef.current, { origin: 'http://localhost:3001' });
-        } catch (_) {}
+    const t = setInterval(() => {
+      if (searchRef.current?.contentWindow) {
+        host.register('search', searchRef.current, { origin: 'http://localhost:3001' });
       }
-      if (resultsRef.current && resultsRef.current.contentWindow) {
-        try {
-          host.register('results', resultsRef.current, { origin: 'http://localhost:3002' });
-        } catch (_) {}
+      if (resultsRef.current?.contentWindow) {
+        host.register('results', resultsRef.current, { origin: 'http://localhost:3002' });
       }
       if (searchRef.current && resultsRef.current) clearInterval(t);
     }, 50);
 
-    // 🔹 envia lista completa ao iniciar
-    host.onStatus(function (id, s) {
-      if (id === 'results' && s.status === 'ready') {
-        host.send('results', EVENTS.SEARCH_RESULT, CITIES);
-      }
+    // 🔹 Host apenas REPASSA o evento
+    const unsub = host.on(EVENTS.SEARCH_SUBMIT, payload => {
+      host.send('results', EVENTS.SEARCH_SUBMIT, payload);
     });
 
-    // 🔹 filtro ao pesquisar
-    var unsub = host.on(EVENTS.SEARCH_SUBMIT, function (payload) {
-      var term = payload && payload.term ? payload.term.toLowerCase() : '';
-
-      var filtered = CITIES.filter(function (c) {
-        if (!term) return true;
-
-        var idMatch = String(c.id).includes(term);
-        var nameMatch = c.name.toLowerCase().includes(term);
-        var ufMatch = c.uf.toLowerCase().includes(term);
-
-        return idMatch || nameMatch || ufMatch;
-      });
-
-      host.send('results', EVENTS.SEARCH_RESULT, filtered);
-    });
-
-    return function () {
+    return () => {
       clearInterval(t);
       offStatus();
       unsub();
       host.destroy();
     };
-  }, [host, CITIES]);
+  }, [host]);
 
   return (
     <div>
       <div style={{ padding: 16 }}>
         <b>1. host</b>
       </div>
+
       <main style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 16, height: '100vh', paddingLeft: 16 }}>
         <MfePanel
           id="2. search"
@@ -166,9 +126,7 @@ export default function Page() {
           iframeRef={searchRef}
           status={status.search.status}
           reason={status.search.reason}
-          onRetry={function () {
-            host.retry('search');
-          }}
+          onRetry={() => host.retry('search')}
         />
 
         <MfePanel
@@ -177,9 +135,7 @@ export default function Page() {
           iframeRef={resultsRef}
           status={status.results.status}
           reason={status.results.reason}
-          onRetry={function () {
-            host.retry('results');
-          }}
+          onRetry={() => host.retry('results')}
         />
       </main>
     </div>

@@ -7,7 +7,7 @@ import { EVENTS } from './events';
 export default function Page() {
   const [term, setTerm] = useState('');
 
-  const bridge = useMemo(function () {
+  const bridge = useMemo(() => {
     return createBridge({
       role: 'child',
       channel: 'mfe-v1',
@@ -19,22 +19,17 @@ export default function Page() {
     });
   }, []);
 
-  useEffect(function () {
+  useEffect(() => {
     bridge.start();
-    return function () {
-      bridge.destroy();
-    };
+    return () => bridge.destroy();
   }, [bridge]);
 
-  // 🔹 debounce simples (300ms)
-  useEffect(function () {
-    const t = setTimeout(function () {
+  useEffect(() => {
+    const t = setTimeout(() => {
       bridge.emit(EVENTS.SEARCH_SUBMIT, { term });
     }, 300);
 
-    return function () {
-      clearTimeout(t);
-    };
+    return () => clearTimeout(t);
   }, [term, bridge]);
 
   return (
@@ -43,16 +38,9 @@ export default function Page() {
 
       <input
         value={term}
-        onChange={function (e) {
-          setTerm(e.target.value);
-        }}
+        onChange={e => setTerm(e.target.value)}
         placeholder="Filtrar por ID, cidade ou UF..."
-        style={{
-          padding: 10,
-          width: '100%',
-          boxSizing: 'border-box',
-          fontSize: 14,
-        }}
+        style={{ padding: 10, width: '100%', fontSize: 14 }}
       />
     </div>
   );

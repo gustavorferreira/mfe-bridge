@@ -7,7 +7,21 @@ import { EVENTS } from './events';
 export default function Page() {
   const [items, setItems] = useState([]);
 
-  const bridge = useMemo(function () {
+  // 🔹 MOCK LOCAL — DONO DO DADO
+  const CITIES = useMemo(() => [
+    { id: 1, name: 'São Paulo', uf: 'SP' },
+    { id: 2, name: 'Rio de Janeiro', uf: 'RJ' },
+    { id: 3, name: 'Belo Horizonte', uf: 'MG' },
+    { id: 4, name: 'Curitiba', uf: 'PR' },
+    { id: 5, name: 'Florianópolis', uf: 'SC' },
+    { id: 6, name: 'Porto Alegre', uf: 'RS' },
+    { id: 7, name: 'Salvador', uf: 'BA' },
+    { id: 8, name: 'Recife', uf: 'PE' },
+    { id: 9, name: 'Fortaleza', uf: 'CE' },
+    { id: 10, name: 'Manaus', uf: 'AM' },
+  ], []);
+
+  const bridge = useMemo(() => {
     return createBridge({
       role: 'child',
       channel: 'mfe-v1',
@@ -19,18 +33,34 @@ export default function Page() {
     });
   }, []);
 
-  useEffect(function () {
+  useEffect(() => {
     bridge.start();
 
-    const unsub = bridge.on(EVENTS.SEARCH_RESULT, function (payload) {
-      setItems(Array.isArray(payload) ? payload : []);
+    // 🔹 inicial
+    setItems(CITIES);
+
+    // 🔹 lógica de negócio AQUI
+    const unsub = bridge.on(EVENTS.SEARCH_SUBMIT, payload => {
+      const term = payload?.term?.toLowerCase() || '';
+
+      const filtered = CITIES.filter(c => {
+        if (!term) return true;
+
+        return (
+          String(c.id).includes(term) ||
+          c.name.toLowerCase().includes(term) ||
+          c.uf.toLowerCase().includes(term)
+        );
+      });
+
+      setItems(filtered);
     });
 
-    return function () {
+    return () => {
       unsub();
       bridge.destroy();
     };
-  }, [bridge]);
+  }, [bridge, CITIES]);
 
   return (
     <div style={{ padding: 16, fontFamily: 'sans-serif' }}>
@@ -50,15 +80,13 @@ export default function Page() {
             </tr>
           </thead>
           <tbody>
-            {items.map(function (c) {
-              return (
-                <tr key={c.id} style={{ borderBottom: '1px solid #eee' }}>
-                  <td>{c.id}</td>
-                  <td>{c.name}</td>
-                  <td>{c.uf}</td>
-                </tr>
-              );
-            })}
+            {items.map(c => (
+              <tr key={c.id} style={{ borderBottom: '1px solid #eee' }}>
+                <td>{c.id}</td>
+                <td>{c.name}</td>
+                <td>{c.uf}</td>
+              </tr>
+            ))}
           </tbody>
         </table>
       )}
